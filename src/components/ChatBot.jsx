@@ -123,7 +123,7 @@ export default function ChatBot({ onVoiceProfileReady, userProfile }) {
     if (voiceState === 'recording') {
       setVoiceState('transcribing');
       try {
-        const text = await stopGroqRecording();
+        const text = await stopGroqRecording(currentLang);
         setInputText(text);
         setVoiceState('idle');
       } catch (error) {

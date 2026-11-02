@@ -1,3 +1,4 @@
+// Bhashini (when BHASHINI_API_KEY is set) is tried first, then the free voices below.
 // ============================================================================
 // Cloud text-to-speech so the chatbot can SPEAK in a user's own language even
 // when their phone/PC has no voice installed for it. No API key, no cost.
@@ -14,6 +15,7 @@
 // gracefully (browser voice → text) and results are cached to keep calls low.
 // ============================================================================
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
+import { bhashiniEnabled, bhashiniSupportsTts, bhashiniSynthesize } from './bhashiniService.js';
 
 const EDGE_VOICES = {
   en: 'en-IN-NeerjaNeural',
@@ -30,11 +32,12 @@ const EDGE_VOICES = {
 const GOOGLE_LANGS = new Set(['en', 'hi', 'bn', 'ta', 'te', 'mr', 'gu', 'kn', 'ml', 'ur', 'pa']);
 
 export const TTS_LANGUAGES = [...new Set([...Object.keys(EDGE_VOICES), ...GOOGLE_LANGS])];
-export const ttsSupports = (lang) => TTS_LANGUAGES.includes(lang);
+// Env is read at call time (dotenv loads after imports); Bhashini adds a second Punjabi voice.
+export const ttsSupports = (lang) => TTS_LANGUAGES.includes(lang) || (bhashiniEnabled() && bhashiniSupportsTts(lang));
 
 const MAX_CHARS = 600;
 const CACHE_MAX = 300;
-const cache = new Map(); // `${lang}:${text}` -> Buffer (insertion-ordered → simple LRU)
+const cache = new Map(); // `${lang}:${text}` -> { audio, contentType } (insertion-ordered → simple LRU)
 
 function cacheGet(k) {
   if (!cache.has(k)) return null;
@@ -106,9 +109,10 @@ export async function synthesize(rawText, lang) {
 
   const key = `${lang}:${text}`;
   const hit = cacheGet(key);
-  if (hit) return { audio: hit, contentType: 'audio/mpeg', provider: 'cache' };
+  if (hit) return { audio: hit.audio, contentType: hit.contentType, provider: 'cache' };
 
   const order = [];
+  if (bhashiniEnabled() && bhashiniSupportsTts(lang)) order.push(['bhashini', bhashiniSynthesize]);
   if (EDGE_VOICES[lang] && !process.env.TTS_DISABLE_EDGE) order.push(['edge', edgeSynth]);
   if (GOOGLE_LANGS.has(lang)) order.push(['google', googleSynth]);
 
@@ -116,8 +120,9 @@ export async function synthesize(rawText, lang) {
   for (const [name, fn] of order) {
     try {
       const audio = await fn(text, lang);
-      cacheSet(key, audio);
-      return { audio, contentType: 'audio/mpeg', provider: name };
+      const contentType = name === 'bhashini' ? 'audio/wav' : 'audio/mpeg';
+      cacheSet(key, { audio, contentType });
+      return { audio, contentType, provider: name };
     } catch (err) { lastErr = err; console.warn(`tts ${name} failed (${lang}):`, err.message); }
   }
   const e = new Error(lastErr?.message || 'Speech synthesis unavailable'); e.code = 'TTS_FAILED'; throw e;

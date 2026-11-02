@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Navigation, Search, Check, Building, ShieldCheck, Lock, ArrowRight, X, Info } from 'lucide-react';
+import { Navigation, Search, Building, ShieldCheck, ArrowRight, X } from 'lucide-react';
 import { detectUserLocation, getLocationPermission, INDIAN_STATES } from '../services/locationService';
 import { useI18n } from '../i18n';
 
@@ -41,7 +41,6 @@ export default function LocationModal({ onLocationGranted, onLocationDenied }) {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [showManualDropdown, setShowManualDropdown] = useState(false);
-  const [selectedManualState, setSelectedManualState] = useState('Uttar Pradesh');
   const [searchStateQuery, setSearchStateQuery] = useState('');
 
   const handleGrantPermission = async () => {
@@ -68,8 +67,8 @@ export default function LocationModal({ onLocationGranted, onLocationDenied }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleConfirmManualState = () => {
-    const matchedState = INDIAN_STATES.find((s) => s.name === selectedManualState) || INDIAN_STATES[0];
+  // Picking a state applies it straight away — no separate confirm step.
+  const handleSelectState = (matchedState) => {
     onLocationGranted({ state: matchedState.name, state_hi: matchedState.name_hi, suggestedLang: matchedState.lang });
   };
 
@@ -79,7 +78,7 @@ export default function LocationModal({ onLocationGranted, onLocationDenied }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-[80] flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col md:flex-row animate-in fade-in zoom-in duration-200">
+      <div className="bg-white rounded-lg w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col md:flex-row animate-in fade-in zoom-in duration-200">
 
         {/* ---------- LEFT BRAND PANEL ---------- */}
         <div
@@ -140,8 +139,7 @@ export default function LocationModal({ onLocationGranted, onLocationDenied }) {
               <div className="w-14 h-14 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto">
                 <Navigation className="w-7 h-7 text-gov-navy" />
               </div>
-              <h3 className="mt-4 text-xl font-extrabold text-gov-navy text-center">{tr('Select Location & State', 'राज्य एवं स्थान का चयन')}</h3>
-              <p className="mt-2 text-sm text-slate-600 text-center max-w-sm mx-auto leading-relaxed">
+              <p className="mt-4 text-sm text-slate-600 text-center max-w-sm mx-auto leading-relaxed">
                 {tr('Share your location to unlock schemes and benefits specific to your state.', 'स्थान दर्ज करके अपने राज्य की विशेष योजनाएँ और लाभ प्राप्त करें।')}
               </p>
 
@@ -154,7 +152,7 @@ export default function LocationModal({ onLocationGranted, onLocationDenied }) {
               <button
                 onClick={handleGrantPermission}
                 disabled={loading}
-                className="mt-6 w-full py-3.5 rounded-lg bg-gov-saffron hover:bg-orange-700 disabled:opacity-70 text-white font-extrabold text-[16px] flex items-center justify-center gap-2 shadow-sm transition-colors"
+                className="mt-6 w-full py-2.5 rounded border-2 border-gov-saffron text-gov-saffron hover:bg-gov-saffron hover:text-white disabled:opacity-70 font-bold text-[14px] flex items-center justify-center gap-2 transition-colors"
               >
                 {loading ? (
                   <span>{tr('Detecting Location…', 'स्थान खोजा जा रहा है…')}</span>
@@ -172,31 +170,15 @@ export default function LocationModal({ onLocationGranted, onLocationDenied }) {
                 {tr('Your location is used only to show schemes. We never store your precise location.', 'आपकी स्थिति का उपयोग केवल योजनाएँ दिखाने के लिए किया जाएगा। हम आपकी सटीक लोकेशन को स्टोर नहीं करते।')}
               </p>
 
-              <div className="relative flex items-center my-5">
-                <div className="flex-grow border-t border-slate-200" />
-                <span className="mx-3 text-xs text-slate-400 font-bold uppercase">{tr('OR', 'या')}</span>
-                <div className="flex-grow border-t border-slate-200" />
-              </div>
-
               <button
                 onClick={() => setShowManualDropdown(true)}
                 disabled={loading}
-                className="w-full py-3.5 rounded-lg border-2 border-slate-300 text-gov-navy hover:border-gov-navy hover:bg-slate-50 font-bold text-[15px] flex items-center justify-center gap-2 transition-colors"
+                className="mt-3 w-full py-2.5 rounded border-2 border-gov-navy text-gov-navy hover:bg-gov-navy hover:text-white font-bold text-[14px] flex items-center justify-center gap-2 transition-colors"
               >
-                <Building className="w-5 h-5 text-gov-navy" />
+                <Building className="w-5 h-5" />
                 <span>{tr('Select State Manually', 'मैन्युअल रूप से राज्य चुनें')}</span>
                 <ArrowRight className="w-5 h-5" />
               </button>
-
-              <p className="mt-3 text-[12px] text-slate-500 flex items-center gap-1.5">
-                <Info className="w-3.5 h-3.5 text-slate-400" />
-                {tr('You can also pick your state and district yourself.', 'आप राज्य और जिला स्वतः भी चुन सकते हैं।')}
-              </p>
-
-              <div className="mt-6 -mx-6 sm:-mx-8 -mb-6 sm:-mb-8 bg-slate-50 border-t border-slate-200 px-6 sm:px-8 py-3 text-center text-xs text-slate-500 flex items-center justify-center gap-1.5">
-                <Lock className="w-3.5 h-3.5" />
-                {tr('Your privacy is our priority. We do not record any personal data.', 'आपकी गोपनीयता हमारी प्राथमिकता है। हम कोई व्यक्तिगत डेटा रिकॉर्ड नहीं करते।')}
-              </div>
             </div>
           ) : (
             /* ---- MANUAL STATE SELECTION ---- */
@@ -218,36 +200,20 @@ export default function LocationModal({ onLocationGranted, onLocationDenied }) {
               </div>
 
               <div className="max-h-[240px] overflow-y-auto border-2 border-slate-200 rounded-xl p-1 bg-slate-50 space-y-1 mt-3">
-                {filteredStates.map((s) => {
-                  const isSelected = selectedManualState === s.name;
-                  return (
-                    <button
-                      key={s.name}
-                      onClick={() => setSelectedManualState(s.name)}
-                      className={`w-full p-2.5 rounded-lg text-left text-sm font-bold flex items-center justify-between transition-colors ${
-                        isSelected
-                          ? 'bg-gov-navy text-white shadow'
-                          : 'bg-white text-slate-800 hover:bg-slate-200 border border-slate-200'
-                      }`}
-                    >
-                      <span>{tr(s.name, s.name_hi)}</span>
-                      {isSelected && <Check className="w-4 h-4 text-amber-400" />}
-                    </button>
-                  );
-                })}
+                {filteredStates.map((s) => (
+                  <button
+                    key={s.name}
+                    onClick={() => handleSelectState(s)}
+                    className="w-full p-2.5 rounded-lg text-left text-sm font-bold bg-white text-slate-800 hover:bg-gov-navy hover:text-white border border-slate-200 transition-colors"
+                  >
+                    {tr(s.name, s.name_hi)}
+                  </button>
+                ))}
               </div>
 
               <button
-                onClick={handleConfirmManualState}
-                className="mt-4 w-full py-3.5 rounded-lg bg-gov-saffron hover:bg-orange-700 text-white font-extrabold text-[15px] flex items-center justify-center gap-2 shadow-sm"
-              >
-                <Check className="w-5 h-5" />
-                <span>{tr('Confirm State Selection', 'चयनित राज्य की पुष्टि करें')}</span>
-              </button>
-
-              <button
                 onClick={() => setShowManualDropdown(false)}
-                className="mt-2 text-xs text-slate-500 hover:text-slate-800 font-bold underline w-full text-center py-1"
+                className="mt-3 text-xs text-slate-500 hover:text-slate-800 font-bold underline w-full text-center py-1"
               >
                 ← {tr('Back to Auto-Location', 'वापस ऑटो-लोकेशन पर जाएँ')}
               </button>

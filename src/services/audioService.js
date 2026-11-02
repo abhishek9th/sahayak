@@ -74,13 +74,13 @@ function splitTextIntoChunks(text, maxLength = 200) {
 
 // ---------------------------------------------------------------------------
 // Cloud voice. When the device has no installed voice for the chosen language,
-// the server (/api/tts — free Microsoft neural / Google voices, see
+// the server (/api/tts — Bhashini when configured, else free Microsoft neural / Google voices, see
 // backend/services/ttsService.js) returns the speech as MP3 so the chatbot can
 // still speak Tamil, Bengali, Telugu… on any phone. Languages the server has no
 // free voice for (currently Odia) fall through to the device voice / silence.
 // ---------------------------------------------------------------------------
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || '';
-const CLOUD_LANGS = new Set(['en', 'hi', 'bn', 'ta', 'te', 'mr', 'gu', 'kn', 'ml', 'ur', 'pa']);
+const CLOUD_LANGS = new Set(['en', 'hi', 'bn', 'ta', 'te', 'mr', 'gu', 'kn', 'ml', 'ur', 'pa', 'or']);
 let currentAudio = null;
 let cloudSession = 0;
 let cloudAbort = null;

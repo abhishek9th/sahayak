@@ -1,6 +1,6 @@
 import express from 'express';
 import { getSupabaseAdmin } from '../services/supabaseAdmin.js';
-import { verifyAccessToken, normalizeMobile } from '../services/otpService.js';
+import { verifyAccessToken, normalizeMobile, widgetSendOtp, widgetRetryOtp, widgetVerifyOtp, allowOtpAction, rememberReq, mobileForReq, isPhoneReq, signProof, checkProof, proofsEnabled } from '../services/otpService.js';
 
 const router = express.Router();
 
@@ -26,6 +26,24 @@ function decodeImage(photoBase64) {
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// DEV/TESTING ONLY: REGISTER_REPLACE_EXISTING=true lets a number that already has an account
+// register again as a brand-new user; the old account and all its data are deleted first.
+// Never enable in production — the OTP token is not bound to the submitted number here, so
+// anyone could otherwise wipe another person's account by registering their number.
+const REPLACE_EXISTING = process.env.REGISTER_REPLACE_EXISTING === 'true';
+
+async function removeAccountsByPhone(supabase, phone) {
+  const { data: rows, error } = await supabase.from('profiles').select('id').eq('phone', phone);
+  if (error) throw error;
+  for (const { id } of rows || []) {
+    const { data: files } = await supabase.storage.from('faces').list(id);
+    if (files?.length) await supabase.storage.from('faces').remove(files.map((f) => `${id}/${f.name}`)).catch(() => {});
+    await supabase.from('profiles').delete().eq('id', id);
+    const { error: delErr } = await supabase.auth.admin.deleteUser(id); // cascades to the user's other tables
+    if (delErr) throw delErr;
+  }
+}
 
 // POST /api/auth/register
 // { email, password, fullName, mobile, verificationToken, photoBase64, profile }
@@ -93,8 +111,15 @@ router.post('/register', async (req, res) => {
       .limit(1)
       .maybeSingle();
     if (exErr) throw exErr;
-    if (existing?.email === mail) return fail(res, 'EMAIL_REGISTERED', 'This email is already registered. Please log in.', 409);
-    if (existing?.phone === normMobile) return fail(res, 'MOBILE_REGISTERED', 'This mobile number is already registered. Please log in.', 409);
+    if (REPLACE_EXISTING) {
+      // Re-registering a number replaces its old account (and all its data) with the new one.
+      await removeAccountsByPhone(supabase, normMobile);
+      const { data: sameEmail } = await supabase.from('profiles').select('id').eq('email', mail).maybeSingle();
+      if (sameEmail) return fail(res, 'EMAIL_REGISTERED', 'This email is already registered. Please log in.', 409);
+    } else {
+      if (existing?.email === mail) return fail(res, 'EMAIL_REGISTERED', 'This email is already registered. Please log in.', 409);
+      if (existing?.phone === normMobile) return fail(res, 'MOBILE_REGISTERED', 'This mobile number is already registered. Please log in.', 409);
+    }
 
     // Create the auth user (Supabase stores a bcrypt hash of the password).
     const { data: created, error: createErr } = await supabase.auth.admin.createUser({
@@ -175,7 +200,7 @@ router.post('/register-check', async (req, res) => {
   try {
     const { data, error } = await supabase.from('profiles').select('id').eq('phone', normMobile).maybeSingle();
     if (error) throw error;
-    if (data) return fail(res, 'MOBILE_REGISTERED', 'This mobile number is already registered. Please log in instead.', 409);
+    if (data && !REPLACE_EXISTING) return fail(res, 'MOBILE_REGISTERED', 'This mobile number is already registered. Please log in instead.', 409);
     res.json({ ok: true });
   } catch (err) {
     console.error('register-check error:', err.message);
@@ -256,6 +281,106 @@ router.post('/reset-password', async (req, res) => {
   } catch (err) {
     console.error('reset-password error:', err.message);
     return fail(res, 'RESET_FAILED', 'Could not reset password. Please try again.', 500);
+  }
+});
+
+// ---- OTP for the Android app (the web app uses the MSG91 browser widget instead) --------------------
+// POST /api/auth/otp/send    { mobile }       -> { reqId }
+// POST /api/auth/otp/retry   { reqId }        -> { reqId }
+// POST /api/auth/otp/verify  { reqId, otp }   -> { verificationToken }  (pass it to /register or /reset-password)
+const clientIp = (req) => String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+const otpFail = (res, err) => {
+  if (err.code === 'OTP_NOT_CONFIGURED') return fail(res, err.code, 'OTP service is not configured', 503);
+  if (err.code === 'OTP_UNREACHABLE') return fail(res, err.code, 'OTP service is unreachable. Please try again.', 502);
+  return fail(res, 'OTP_REJECTED', err.message || 'OTP request failed', 400);
+};
+
+router.post('/otp/send', async (req, res) => {
+  const mobile = normalizeMobile(req.body?.mobile);
+  if (!mobile) return fail(res, 'INVALID_MOBILE', 'Please enter a valid 10-digit mobile number');
+  if (!allowOtpAction('send:ip:' + clientIp(req), 10, 3600_000) || !allowOtpAction('send:mobile:' + mobile, 3, 15 * 60_000)) {
+    return fail(res, 'RATE_LIMITED', 'Too many OTP requests. Please wait a few minutes and try again.', 429);
+  }
+  try {
+    const data = await widgetSendOtp(mobile);
+    rememberReq(data.message, mobile);
+    res.json({ ok: true, reqId: data.message });
+  } catch (err) { otpFail(res, err); }
+});
+
+// POST /api/auth/otp/phone-sent { mobile, reqId } -> { ok }
+// The app can ask MSG91 for the OTP itself (so the SMS request comes from the phone, not from this server's shared host
+// address). The server then only has to verify it. Because a phone could claim any number for a reqId, this is accepted
+// ONLY for numbers with no account yet (new sign-ups). Such a reqId never gets a sign-in proof, so it cannot be used to
+// log in to, or reset the password of, an existing account.
+router.post('/otp/phone-sent', async (req, res) => {
+  const mobile = normalizeMobile(req.body?.mobile);
+  const reqId = String(req.body?.reqId || '');
+  if (!mobile || !reqId) return fail(res, 'INVALID_INPUT', 'mobile and reqId are required');
+  if (!allowOtpAction('phone:ip:' + clientIp(req), 30, 3600_000)) return fail(res, 'RATE_LIMITED', 'Too many requests. Please wait a few minutes and try again.', 429);
+  let supabase;
+  try { supabase = getSupabaseAdmin(); } catch (err) { return fail(res, err.code || 'SUPABASE_NOT_CONFIGURED', 'Server is not configured', 503); }
+  try {
+    const { data, error } = await supabase.from('profiles').select('id').eq('phone', mobile).maybeSingle();
+    if (error) throw error;
+    if (data && !REPLACE_EXISTING) return fail(res, 'MOBILE_REGISTERED', 'This number already has an account. Please sign in with your password.', 409);
+    rememberReq(reqId, mobile, { phone: true });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('phone-sent error:', err.message);
+    return fail(res, 'DB_ERROR', 'Something went wrong. Please try again.', 500);
+  }
+});
+
+router.post('/otp/retry', async (req, res) => {
+  const reqId = String(req.body?.reqId || '');
+  if (!reqId) return fail(res, 'INVALID_INPUT', 'reqId is required');
+  if (!allowOtpAction('retry:ip:' + clientIp(req), 10, 3600_000) || !allowOtpAction('retry:req:' + reqId, 3, 15 * 60_000)) {
+    return fail(res, 'RATE_LIMITED', 'Too many OTP requests. Please wait a few minutes and try again.', 429);
+  }
+  try {
+    const data = await widgetRetryOtp(reqId);
+    const m = mobileForReq(reqId);
+    rememberReq(data.message || reqId, m);
+    res.json({ ok: true, reqId: data.message || reqId });
+  } catch (err) { otpFail(res, err); }
+});
+
+router.post('/otp/verify', async (req, res) => {
+  const reqId = String(req.body?.reqId || '');
+  const otp = String(req.body?.otp || '').replace(/\D/g, '');
+  if (!reqId || otp.length < 4) return fail(res, 'INVALID_INPUT', 'reqId and otp are required');
+  if (!allowOtpAction('verify:req:' + reqId, 6, 15 * 60_000) || !allowOtpAction('verify:ip:' + clientIp(req), 30, 3600_000)) {
+    return fail(res, 'RATE_LIMITED', 'Too many attempts. Please request a new OTP.', 429);
+  }
+  try {
+    const data = await widgetVerifyOtp(reqId, otp);
+    const m = mobileForReq(reqId);
+    res.json({ ok: true, verificationToken: data.message, mobile: m, proof: m && !isPhoneReq(reqId) && proofsEnabled() ? signProof(m) : null });
+  } catch (err) { otpFail(res, err); }
+});
+
+// POST /api/auth/otp-login { mobile, proof } -> { tokenHash }
+// Passwordless sign-in for an EXISTING account after its mobile OTP was verified (proof from /otp/verify).
+// The app exchanges tokenHash with supabase.auth.verifyOtp({ token_hash, type: 'magiclink' }) to get a session.
+router.post('/otp-login', async (req, res) => {
+  const mobile = normalizeMobile(req.body?.mobile);
+  if (!mobile) return fail(res, 'INVALID_MOBILE', 'Invalid mobile number');
+  if (!proofsEnabled()) return fail(res, 'NOT_CONFIGURED', 'OTP sign-in is not configured', 503);
+  if (!checkProof(mobile, req.body?.proof)) return fail(res, 'OTP_NOT_VERIFIED', 'Please verify the OTP for this number first', 401);
+  if (!allowOtpAction('login:ip:' + clientIp(req), 20, 3600_000)) return fail(res, 'RATE_LIMITED', 'Too many attempts. Please wait and try again.', 429);
+  let supabase;
+  try { supabase = getSupabaseAdmin(); } catch (err) { return fail(res, err.code || 'SUPABASE_NOT_CONFIGURED', 'Server is not configured', 503); }
+  try {
+    const { data: prof, error } = await supabase.from('profiles').select('email').eq('phone', mobile).maybeSingle();
+    if (error) throw error;
+    if (!prof) return fail(res, 'USER_NOT_FOUND', 'No account is registered with this mobile number', 404);
+    const { data, error: linkErr } = await supabase.auth.admin.generateLink({ type: 'magiclink', email: prof.email });
+    if (linkErr || !data?.properties?.hashed_token) throw linkErr || new Error('no token');
+    res.json({ ok: true, tokenHash: data.properties.hashed_token });
+  } catch (err) {
+    console.error('otp-login error:', err.message);
+    return fail(res, 'LOGIN_FAILED', 'Could not sign you in. Please try again.', 500);
   }
 });
 

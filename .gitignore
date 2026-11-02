@@ -2,3 +2,6 @@
 .env
 node_modules/
 dist/
+
+# local backup of user names written by backend/scripts/clearUserNames.mjs (personal data)
+backend/data/user-name-backup.json

@@ -19,7 +19,13 @@ import eligibilityRouter from './routes/eligibility.js';
 import documentsRouter from './routes/documents.js';
 import conflictsRouter from './routes/conflicts.js';
 import advisorRouter from './routes/advisor.js';
+import notificationsRouter from './routes/notifications.js';
+import savedRouter from './routes/saved.js';
+import newsRouter from './routes/news.js';
+import visionRouter from './routes/vision.js';
+import lockerRouter from './routes/locker.js';
 import { synthesize, allowRequest } from './services/ttsService.js';
+import { bhashiniEnabled, bhashiniSupports, bhashiniTranscribe, bhashiniTranslate, bhashiniNmtEnabled } from './services/bhashiniService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +97,19 @@ app.use('/api/documents', documentsRouter);
 // Scheme conflict engine — official-rule-driven mutual-exclusion detection.
 app.use('/api/conflicts', conflictsRouter);
 app.use('/api/advisor', advisorRouter);
+
+// Android app: push-device registration, notification preferences + in-app inbox, saved schemes.
+app.use('/api/notifications', notificationsRouter);
+app.use('/api/saved', savedRouter);
+
+// Latest scheme-related headlines (Google News RSS, cached).
+app.use('/api/news', newsRouter);
+
+// Reads a scheme banner/poster photo and matches it against the real catalogue.
+app.use('/api/vision', visionRouter);
+
+// Sahayak Locker PIN (set / verify / change).
+app.use('/api/locker', lockerRouter);
 
 // Endpoint to understand natural language or partial profile using Groq
 app.post('/api/analyze-user', async (req, res) => {
@@ -170,7 +189,13 @@ app.post('/api/translate', async (req, res) => {
       return res.status(503).json({ error: 'Service configuration error.' });
     }
 
-    const translations = await translateBatch(texts, targetLang, sourceLang || 'en');
+    let translations;
+    const src = sourceLang || 'en';
+    if (bhashiniNmtEnabled() && bhashiniSupports(targetLang) && bhashiniSupports(src) && src !== targetLang) {
+      try { translations = await bhashiniTranslate(texts, src, targetLang); }
+      catch (err) { console.warn('Bhashini NMT failed, using Groq:', err.message); }
+    }
+    translations ||= await translateBatch(texts, targetLang, src);
     res.json({ translations });
   } catch (error) {
     console.error('Translation error:', error.message);
@@ -202,17 +227,36 @@ app.post('/api/tts', async (req, res) => {
   }
 });
 
+// Which voice providers are live (never exposes the key) — handy for debugging deploys.
+app.get('/api/voice/status', (req, res) => {
+  res.json({ bhashini: bhashiniEnabled(), bhashiniNmt: bhashiniNmtEnabled(), groqFallback: Boolean(process.env.GROQ_API_KEY) });
+});
+
+const WHISPER_LANGS = new Set(['en', 'hi', 'bn', 'gu', 'kn', 'ml', 'mr', 'pa', 'ta', 'te', 'ur']);
+
 // Audio stays in memory only long enough to send it to Groq Whisper.
-app.post('/api/voice/transcribe', express.raw({ type: ['audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg'], limit: '12mb' }), async (req, res) => {
+app.post('/api/voice/transcribe', express.raw({ type: ['audio/webm', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/flac', 'audio/mp4', 'audio/m4a', 'audio/x-m4a', 'audio/aac'], limit: '12mb' }), async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: 'No audio received' });
+    // Bhashini first (understands all 12 app languages, WAV input); Groq Whisper is the fallback.
+    const lang = String(req.query.lang || '');
+    if (bhashiniEnabled() && bhashiniSupports(lang) && !/webm|mp4|m4a|aac/.test(req.headers['content-type'] || '')) { // those need converting; Groq handles them
+      try {
+        return res.json({ text: await bhashiniTranscribe(req.body, lang, req.headers['content-type'] || ''), provider: 'bhashini' });
+      } catch (err) {
+        console.warn(`Bhashini ASR failed (${lang}), falling back to Groq:`, err.message);
+      }
+    }
     const groq = new (await import('groq-sdk')).default({ apiKey: process.env.GROQ_API_KEY });
-    const extension = req.headers['content-type']?.includes('ogg') ? 'ogg' : 'webm';
+    const ct = req.headers['content-type'] || '';
+    const extension = ct.includes('ogg') ? 'ogg' : ct.includes('wav') ? 'wav' : /mp4|m4a/.test(ct) ? 'm4a' : ct.includes('aac') ? 'aac' : /mpeg|mp3/.test(ct) ? 'mp3' : ct.includes('flac') ? 'flac' : 'webm';
     const audioFile = new File([req.body], `schemesetu-recording.${extension}`, { type: req.headers['content-type'] || 'audio/webm' });
     const transcription = await groq.audio.transcriptions.create({
       file: audioFile,
       model: 'whisper-large-v3-turbo',
-      response_format: 'json'
+      response_format: 'json',
+      // Language hint helps short utterances; Whisper has no Odia model, so Odia stays on auto-detect.
+      ...(WHISPER_LANGS.has(String(req.query.lang || '')) ? { language: String(req.query.lang) } : {})
     });
     res.json({ text: transcription.text || '' });
   } catch {
